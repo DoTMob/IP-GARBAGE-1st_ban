@@ -1,14 +1,123 @@
-173.245.48.0/20
-103.21.244.0/22
-103.22.200.0/22
-103.31.4.0/22
-141.101.64.0/18
-108.162.192.0/18
-190.93.240.0/20
-188.114.96.0/20
-197.234.240.0/22
-198.41.128.0/17
-162.158.0.0/15
-104.16.0.0/12
-172.64.0.0/13
-131.0.72.0/22
+# =============================================================================
+# blacklist.txt — MANUAL / CURATED persistent bans (IP or CIDR list)
+#
+# Loaded by autoban.sh into the autoban_manual{4,6} ipset sets at startup.
+# Membership is checked BEFORE scoring, so anything listed here is always
+# blocked (subject to whitelist override — whitelist wins).
+#
+# This file is for entries that should survive reboots and expire only when
+# YOU remove them. Do NOT hand-add auto-banned IPs here: the daemon bans
+# those in the runtime ipset with a TTL, and they will be re-learned if the
+# behavior continues.
+#
+# -----------------------------------------------------------------------------
+# Format
+# -----------------------------------------------------------------------------
+#   <ip-or-cidr>                                  permanent until removed
+#   <ip-or-cidr>  # reason=<short-text> [until=YYYY-MM-DD]
+#   <ip-or-cidr>  # source=<feed-name> [until=YYYY-MM-DD]
+#
+# - '#' starts a comment; everything after it is ignored by the loader.
+# - 'reason=' and 'source=' are informational (logged on load).
+# - 'until=' is informational today; autoban.sh logs a warning on load when
+#   an entry is past its 'until' date but does NOT auto-remove it. To prune
+#   expired entries, see the "Auto-update" section below.
+# - Prefixes shorter than /8 are refused unless FORCE_BROAD=yes is exported.
+# - /0 is always refused.
+#
+# -----------------------------------------------------------------------------
+# Auto-update from public threat feeds (recommended)
+# -----------------------------------------------------------------------------
+# Static lists rot. The safest way to keep this file current is to let a
+# small cron/timer job pull from one or more feeds, normalize them to the
+# format above, and rewrite this file. autoban.sh then picks up changes on
+# SIGHUP (systemctl reload autoban) or on the next restart.
+#
+# Suggested update pattern (see docs/feeds.md for the full recipe):
+#
+#   1. Fetch each feed into /var/lib/autoban/feeds/<name>.raw
+#   2. Filter to entries that are valid IP or CIDR (grep -E)
+#   3. Annotate with source=<name> and until=<feed-ttl-date>
+#   4. Concatenate the curated/manual block below, sort -u, write atomically
+#   5. `systemctl reload autoban`
+#
+# Minimal example (bash, root):
+#
+#   FEEDS=/var/lib/autoban/feeds
+#   TMP=$(mktemp /tmp/blacklist.XXXXXX)
+#   mkdir -p "$FEEDS"
+#   curl -fsSL --max-time 30 https://www.spamhaus.org/drop/drop.txt \
+#     | awk -F';' '/^[0-9]/{gsub(/ /,"",$1); print $1 "  # source=spamhaus-drop"}' \
+#     >> "$TMP"
+#   curl -fsSL --max-time 30 https://feeds.dshield.org/block.txt \
+#     | awk -F'\t' '/^[0-9]/{print $1 "/24  # source=dshield"}' \
+#     >> "$TMP"
+#   cat /etc/autoban/blacklist.manual >> "$TMP"     # your hand-curated block
+#   sort -u "$TMP" > /etc/autoban/blacklist.txt
+#   rm -f "$TMP"
+#   systemctl reload autoban
+#
+# Suggested schedule: daily at a quiet hour via systemd timer or cron:
+#   17 3 * * * /usr/local/sbin/autoban-feed-update.sh
+#
+# -----------------------------------------------------------------------------
+# Known threat feed sources (verify license / ToS before relying on them)
+# -----------------------------------------------------------------------------
+#   spamhaus-drop       https://www.spamhaus.org/drop/drop.txt
+#   spamhaus-edrop      https://www.spamhaus.org/drop/edrop.txt
+#   spamhaus-asndrop    https://www.spamhaus.org/drop/asndrop.json
+#   dshield             https://feeds.dshield.org/block.txt
+#   firehol-level1      https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset
+#   blocklist.de        https://lists.blocklist.de/lists/all.txt
+#   tor-exits           https://check.torproject.org/torbulkexitlist
+#   emerging-threats    https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt
+#   abuseipdb (key req) https://api.abuseipdb.com/api/v2/blacklist
+#
+# Each feed has different licensing and TTL semantics. Spamhaus DROP and
+# EDROP are "do not route" lists and are safe for firewall use. Tor exit
+# lists change hourly — decide whether you want to ban Tor exits at all
+# before subscribing. Some feeds (AbuseIPDB, commercial) require an API
+# key; keep the key OUT of this file, in /etc/autoban/feeds.env.
+#
+# -----------------------------------------------------------------------------
+# Per-threat-level feed mapping (optional)
+# -----------------------------------------------------------------------------
+# If you want severity tiers, keep three source files and combine them
+# based on your risk tolerance:
+#
+#   blacklist.critical.txt   spamhaus-drop + spamhaus-edrop
+#   blacklist.high.txt       firehol-level1 + dshield
+#   blacklist.medium.txt     tor-exits + blocklist.de
+#
+# All three can be concatenated into this file; the 'source=' annotation
+# preserves provenance when the combined list is audited later.
+#
+# -----------------------------------------------------------------------------
+# Seed entries — EXAMPLES ONLY, do not enable without verification
+# -----------------------------------------------------------------------------
+# These are commented out deliberately. Documented public blocklists change;
+# a stale "known bad" range that later belongs to a legitimate service is a
+# real outage. Pull live ranges from the feeds above, or uncomment after
+# verifying against the current published feed. Every entry MUST carry a
+# source= and until= annotation so it can be audited and pruned.
+#
+# 192.0.2.0/24      # reason=demo scan-source range  source=EXAMPLE  until=2025-06-30
+# 198.51.100.44     # reason=credential-stuffing     source=EXAMPLE  until=2025-06-30
+# 2001:db8::/48     # reason=abusive v6 scanner     source=EXAMPLE  until=2025-06-30
+#
+# (192.0.2.0/24, 198.51.100.0/24, and 2001:db8::/32 are RFC 5737 / RFC 3849
+#  documentation ranges and are reserved for exactly this kind of sample.)
+#
+# -----------------------------------------------------------------------------
+# Operator-curated manual bans
+# -----------------------------------------------------------------------------
+# Uncomment and edit. Keep the annotation format for future audits.
+#
+# 203.0.113.42     # reason=repeat scanner           until=2025-12-31
+# 203.0.113.0/28   # reason=abusive /28             until=2025-12-31
+# 198.18.0.0/15    # reason=internal-pen-test        until=2025-09-01
+#
+# -----------------------------------------------------------------------------
+# Anything below this line without a '#' prefix is actively enforced.
+# Keep the file sorted (sort -u) so diffs during review stay readable.
+# -----------------------------------------------------------------------------
