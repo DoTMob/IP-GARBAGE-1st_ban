@@ -1,64 +1,158 @@
 #!/bin/bash
-# autoban daemon
-# chkconfig: 345 20 80
-# description: autoban daemon
-# processname: autoban
+### BEGIN INIT INFO
+# Provides:          autoban
+# Required-Start:    $network $remote_fs
+# Required-Stop:     $network $remote_fs
+# Default-Start:     3 4 5
+# Default-Stop:      0 1 2 6
+# Short-Description: Adaptive log-driven IP ban daemon
+# Description:       Reads local web-server logs and manages the host's
+#                    own ipset/iptables firewall. Defensive tooling only.
+### END INIT INFO
+#
+# autoban-initd — thin SysV wrapper around autoban.sh.
+#
+# Behavior:
+#   * If systemd is running AND autoban.service is installed, every action
+#     is delegated to `systemctl`, so this script and the unit behave
+#     identically. This avoids drift between two supervisors.
+#   * Otherwise, we supervise autoban.sh directly with a proper PID file,
+#     SIGTERM-then-SIGKILL stop sequence, and HUP-based reload.
+#
+# The daemon itself also takes an exclusive flock, so double-starts are
+# rejected on its side regardless of which path launched it.
 
-DAEMON_PATH="/opt/autoban"
+set -euo pipefail
 
-DAEMON=autoban
-DAEMONOPTS="-my opts"
+NAME="autoban"
+DAEMON="/opt/autoban/autoban.sh"
+CONFIG="/etc/autoban/autoban.conf"
+PIDFILE="/var/run/${NAME}.pid"
+LOCKFILE="/var/run/${NAME}.initd.lock"
+UNIT="autoban.service"
 
-NAME=autoban
-DESC="My daemon description"
-PIDFILE=/var/run/$NAME.pid
-SCRIPTNAME=/etc/init.d/$NAME
+# --- helpers ---------------------------------------------------------------
+have_systemd_unit() {
+    command -v systemctl >/dev/null 2>&1 \
+        && [[ -d /run/systemd/system ]] \
+        && systemctl list-unit-files --no-legend 2>/dev/null \
+           | awk '{print $1}' | grep -qx "$UNIT"
+}
 
-case "$1" in
-start)
-        printf "%-50s" "Starting $NAME..."
-        $DAEMON_PATH/autoban.sh &
-        PID=`echo $!`
-        #echo "Saving PID" $PID " to " $PIDFILE
-        if [ -z $PID ]; then
-            printf "%s\n" "Fail"
-        else
-            echo $PID > $PIDFILE
-            printf "%s\n" "OK"
-        fi
-;;
-status)
-        printf "%-50s" "Checking $NAME..."
-        if [ -f $PIDFILE ]; then
-            PID=`cat $PIDFILE`
-            if [ -z "`ps axf | grep ${PID} | grep -v grep`" ]; then
-                printf "%s\n" "Process dead but pidfile exists"
-            else
-                echo "Running"
-            fi
-                    else
-            printf "%s\n" "Service not running"
-        fi
-;;
-stop)
-        printf "%-50s" "Stopping $NAME"
-            PID=`cat $PIDFILE`
-            cd $DAEMON_PATH
-        if [ -f $PIDFILE ]; then
-            kill -HUP $PID
-            printf "%s\n" "OK"
-            rm -f $PIDFILE
-        else
-            printf "%s\n" "pidfile not found"
-        fi
-;;
+read_pid() {
+    [[ -f "$PIDFILE" ]] || { echo ""; return; }
+    local pid
+    pid=$(cat "$PIDFILE" 2>/dev/null || true)
+    [[ "$pid" =~ ^[0-9]+$ ]] || { echo ""; return; }
+    echo "$pid"
+}
 
-restart)
-        $0 stop
-        $0 start
-;;
+is_running() {
+    local pid
+    pid=$(read_pid)
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
 
-*)
-        echo "Usage: $0 {status|start|stop|restart}"
-        exit 1
+# Serialize start/stop against concurrent invocations of this init script.
+take_initd_lock() {
+    exec 8>"$LOCKFILE"
+    flock -n 8 || { echo "$NAME: another init.d action is in progress" >&2; exit 1; }
+}
+
+# --- delegation to systemd --------------------------------------------------
+if have_systemd_unit; then
+    case "${1:-}" in
+        start)   exec systemctl start   "$UNIT" ;;
+        stop)    exec systemctl stop    "$UNIT" ;;
+        restart) exec systemctl restart "$UNIT" ;;
+        reload)  exec systemctl reload  "$UNIT" ;;
+        status)  exec systemctl status  "$UNIT" ;;
+        *)       echo "Usage: $0 {start|stop|restart|reload|status}" >&2; exit 1 ;;
+    esac
+fi
+
+# --- native SysV supervision ------------------------------------------------
+[ -x "$DAEMON" ] || { echo "not executable: $DAEMON" >&2; exit 5; }
+[ -r "$CONFIG" ] || { echo "config not readable: $CONFIG" >&2; exit 6; }
+
+do_start() {
+    take_initd_lock
+    if is_running; then
+        echo "$NAME already running (pid $(read_pid))"
+        return 0
+    fi
+    # Stale pidfile from a previous crash is cleared here.
+    [[ -f "$PIDFILE" ]] && rm -f "$PIDFILE"
+
+    echo -n "Starting $NAME: "
+    setsid "$DAEMON" --config "$CONFIG" run </dev/null >/dev/null 2>&1 &
+    local pid=$!
+    echo "$pid" > "$PIDFILE"
+    sleep 1
+    if is_running; then
+        echo "OK (pid $pid)"
+    else
+        echo "FAILED"
+        rm -f "$PIDFILE"
+        return 1
+    fi
+}
+
+do_stop() {
+    take_initd_lock
+    if ! is_running; then
+        echo "$NAME not running"
+        rm -f "$PIDFILE"
+        return 0
+    fi
+
+    echo -n "Stopping $NAME: "
+    local pid
+    pid=$(read_pid)
+    kill -TERM "$pid" 2>/dev/null || true
+
+    local i
+    for i in {1..15}; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 1
+    done
+
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "TIMEOUT, sending SIGKILL"
+        kill -KILL "$pid" 2>/dev/null || true
+    else
+        echo "OK"
+    fi
+    rm -f "$PIDFILE"
+}
+
+do_reload() {
+    if ! is_running; then
+        echo "$NAME not running"
+        return 1
+    fi
+    kill -HUP "$(read_pid)"
+    echo "reloaded"
+}
+
+do_status() {
+    if is_running; then
+        echo "$NAME running (pid $(read_pid))"
+        return 0
+    elif [[ -f "$PIDFILE" ]]; then
+        echo "$NAME dead but pidfile exists ($PIDFILE)"
+        return 1
+    else
+        echo "$NAME stopped"
+        return 3
+    fi
+}
+
+case "${1:-}" in
+    start)   do_start   ;;
+    stop)    do_stop    ;;
+    restart) do_stop; do_start ;;
+    reload)  do_reload  ;;
+    status)  do_status  ;;
+    *)       echo "Usage: $0 {start|stop|restart|reload|status}" >&2; exit 1 ;;
 esac
