@@ -6,7 +6,7 @@ Built on `ipset` + `iptables` (`iptables-nft` on modern distros). Sliding-window
 scoring, TTL bans with recidivism escalation, CIDR-correct whitelist, and
 digest alerting — in a single auditable shell script.
 
-**Maintained by [`SL\_CE"I\_"`](https://github.com/)**
+**Maintained by [`SL_CE"I_"`](https://github.com/DoTMob/)**
 
 [![Version](https://img.shields.io/badge/version-2.0.1-blue.svg)](#changelog)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](#license)
