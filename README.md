@@ -183,23 +183,25 @@ flowchart TD
     P -- fail --> D[drop]
     P -- ok --> IP{valid IP?}
     IP -- no --> D
-    IP -- yes --> X[resolve real client IP<br/>trusted-proxy walk]
+    IP -- yes --> X["resolve real client IP<br/>trusted-proxy walk"]
     X --> W{whitelisted?}
     W -- yes --> D
     W -- no --> M{manual ban?}
     M -- yes --> D
-    M -- no --> SC[score_add<br/>request=1 · 4xx=5 · 5xx=8<br/>path=10 · ua=10]
+    M -- no --> SC["score_add<br/>request=1 · 4xx=5 · 5xx=8<br/>path=10 · ua=10"]
 
-    SC --> G{score ≥ BAN_THRESHOLD<br/>AND<br/>count ≥ MIN_REQUESTS<br/>AND<br/>signals ≥ MIN_SIGNALS}
+    SC --> G{"score ≥ BAN_THRESHOLD<br/>AND count ≥ MIN_REQUESTS<br/>AND signals ≥ MIN_SIGNALS"}
     G -- no --> NEXT[next line]
     G -- yes --> OFF[offense_bump]
-    OFF --> TTL[ttl = DEFAULT × TTL_STEP^&#40;n−1&#41;<br/>capped at MAX_TTL]
+    OFF --> TTL["ttl = DEFAULT × TTL_STEP^(n−1), capped at MAX_TTL"]
     TTL --> DRY{--dry-run?}
     DRY -- yes --> LOG1[log would_ban]
-    DRY -- no --> ADD[ipset add autoban4&#40;6&#41;<br/>timeout TTL]
+    DRY -- no --> ADD["ipset add autoban4 or autoban6<br/>with timeout = TTL"]
     ADD --> NQ[notify_enqueue]
     NQ --> NEXT
 ```
+
+
 
 ### Signal weights (configurable)
 
