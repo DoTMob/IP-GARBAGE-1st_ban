@@ -1,3 +1,6 @@
+================================================================================
+=== FILE: autoban.sh
+================================================================================
 #!/usr/bin/env bash
 # =============================================================================
 # autoban.sh — Adaptive, log-driven IP ban daemon for nginx / Apache / HAProxy
@@ -39,7 +42,6 @@ readonly DEFAULT_STATE="/var/lib/autoban"
 readonly DEFAULT_LOG="/var/log/autoban"
 readonly DEFAULT_INSTALL_DIR="/opt/autoban"
 
-# Runtime-overridable
 CONFIG_FILE="$DEFAULT_CONF"
 ACTION="run"
 ARG1=""
@@ -77,7 +79,6 @@ json_escape() {
     printf '%s' "$s"
 }
 
-# log_json <event> [key=val ...]
 log_json() {
     local event=$1; shift
     [[ -n "$EVENTS_LOG" ]] || return 0
@@ -97,7 +98,6 @@ log_json() {
 # =============================================================================
 # §3  Config loader + validator
 # =============================================================================
-# Defaults (overridden by config file; see config/autoban.conf)
 : "${NGINX_LOG:=/var/log/nginx/access.log}"
 : "${LOG_FORMAT:=combined}"
 : "${PARSE_REGEX:=}"
@@ -129,7 +129,6 @@ load_config() {
     local file=$1 line key val
     [[ -f "$file" ]] || die "config not found: $file"
     while IFS= read -r line || [[ -n "$line" ]]; do
-        # trim leading whitespace
         line="${line#"${line%%[![:space:]]*}"}"
         [[ -z "$line" || "$line" == \#* ]] && continue
         [[ "$line" =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]] || continue
@@ -144,8 +143,6 @@ load_config() {
 validate_config() {
     [[ "$LOG_FORMAT" =~ ^(combined|json|custom)$ ]] \
         || die "LOG_FORMAT must be combined|json|custom"
-    [[ "$LOG_FORMAT" == "custom" && -z "$PARSE_REGEX" ]] \
-        || true
     [[ "$NOTIFY" =~ ^(none|digest|per-ip)$ ]] \
         || die "NOTIFY must be none|digest|per-ip"
     [[ "$DEFAULT_TTL" =~ ^[0-9]+$ ]] || die "DEFAULT_TTL must be integer"
@@ -221,10 +218,6 @@ is_trusted_proxy() {
 # =============================================================================
 # §6  Firewall backend (ipset + iptables)
 # =============================================================================
-# Modern distros ship iptables-nft, which uses nftables underneath, so this
-# path is nft-compatible without a separate backend. We require ipset because
-# it gives O(1) membership, native TTL, and correct CIDR matching for free.
-
 fw_init() {
     need_cmd ipset
     need_cmd iptables
@@ -238,7 +231,6 @@ fw_init() {
     ipset create "${IPSET_NAME}_trusted4"  hash:net family inet  -exist
     ipset create "${IPSET_NAME6}_trusted6" hash:net family inet6 -exist
 
-    # IPv4 chain
     iptables -nL AUTOBAN >/dev/null 2>&1 || iptables -N AUTOBAN
     iptables -C INPUT -j AUTOBAN 2>/dev/null || iptables -I INPUT 1 -j AUTOBAN
     iptables -C AUTOBAN -m set --match-set "${IPSET_NAME}" src \
@@ -246,7 +238,6 @@ fw_init() {
         || iptables -A AUTOBAN -m set --match-set "${IPSET_NAME}" src \
             -m comment --comment "autoban-drop" -j DROP
 
-    # IPv6 chain
     if command -v ip6tables >/dev/null 2>&1; then
         ip6tables -nL AUTOBAN >/dev/null 2>&1 || ip6tables -N AUTOBAN
         ip6tables -C INPUT -j AUTOBAN 2>/dev/null || ip6tables -I INPUT 1 -j AUTOBAN
@@ -311,25 +302,16 @@ fw_teardown() {
 # =============================================================================
 # §7  Whitelist / blacklist → ipset loaders
 # =============================================================================
-# Loading CIDRs into hash:net sets means ipset test does correct CIDR math for
-# us — no per-line comparisons in bash. Rules:
-#   * blank lines and # comments ignored
-#   * invalid entries warned and skipped
-#   * /0 and prefixes shorter than /8 refused unless FORCE_BROAD=yes
-#   * optional "  # until=YYYY-MM-DD reason=..." trailers are ignored here
-
 _load_list_into_set() {
     local file=$1 set4=$2 set6=$3 label=$4
-    local line entry reason n=0 skip=0
+    local line entry n=0 skip=0
     [[ -f "$file" ]] || { log "list not found, skipping: $file"; return 0; }
     while IFS= read -r line || [[ -n "$line" ]]; do
-        # strip comment
         line="${line%%#*}"
         line="${line#"${line%%[![:space:]]*}"}"
         line="${line%"${line##*[![:space:]]}"}"
         [[ -z "$line" ]] && continue
         entry="$line"
-        # /0 or too-broad guard
         if [[ "$entry" =~ /([0-9]+)$ ]]; then
             local pfx="${BASH_REMATCH[1]}"
             if (( pfx == 0 )) || { (( pfx < 8 )) && [[ "${FORCE_BROAD:-no}" != "yes" ]]; }; then
@@ -337,7 +319,6 @@ _load_list_into_set() {
                 skip=$((skip+1)); continue
             fi
         fi
-        # Decide family and add
         if [[ "$entry" == *:* ]]; then
             ipset add "$set6" "$entry" -exist 2>/dev/null || { log "invalid v6 in $label: $entry"; skip=$((skip+1)); continue; }
         else
@@ -349,7 +330,6 @@ _load_list_into_set() {
 }
 
 load_lists() {
-    # Trusted proxies (for XFF resolution)
     local tp
     for tp in ${TRUSTED_PROXIES//,/ }; do
         [[ -z "$tp" ]] && continue
@@ -360,7 +340,6 @@ load_lists() {
         fi
     done
 
-    # Protected ranges — always in "never" set
     local pr
     for pr in ${PROTECTED_RANGES//,/ }; do
         [[ -z "$pr" ]] && continue
@@ -378,10 +357,6 @@ load_lists() {
 # =============================================================================
 # §8  Log reader (inode + offset, rotation-safe)
 # =============================================================================
-# State file records "<inode>:<offset>". If inode changes (rotation) or the
-# file shrank (truncation), we reset to 0. First run writes current size so
-# old logs aren't processed — override with --replay.
-
 LOG_STATE_FILE=""
 
 init_log_state() {
@@ -417,11 +392,8 @@ read_new_lines() {
 # =============================================================================
 # §9  Log parsers
 # =============================================================================
-# Each parser sets: PARSE_IP PARSE_STATUS PARSE_PATH PARSE_UA PARSE_XFF
-
 parse_combined() {
     local line=$1
-    # "<ip> - - [time] "REQ" STATUS SIZE "REF" "UA""
     [[ $line =~ ^([^[:space:]]+)[[:space:]][^[:space:]]+[[:space:]][^[:space:]]+[[:space:]]\[[^]]+\][[:space:]]\"([^\"]*)\"[[:space:]]([0-9]{3})[[:space:]][0-9-]+[[:space:]]\"([^\"]*)\"[[:space:]]\"([^\"]*)\" ]] || return 1
     PARSE_IP="${BASH_REMATCH[1]}"
     PARSE_STATUS="${BASH_REMATCH[3]}"
@@ -433,16 +405,11 @@ parse_combined() {
 
 parse_json() {
     local line=$1
-    # Expects nginx log_format escape=json with keys: remote_addr, status,
-    # request_uri (or request), http_user_agent, http_x_forwarded_for
     [[ $line =~ \"remote_addr\":\"([^\"]+)\" ]] || return 1
     PARSE_IP="${BASH_REMATCH[1]}"
-    PARSE_STATUS=""
-    PARSE_PATH=""
-    PARSE_UA=""
-    PARSE_XFF=""
-    [[ $line =~ \"status\":([0-9]+) ]]           && PARSE_STATUS="${BASH_REMATCH[1]}"
-    [[ $line =~ \"request_uri\":\"([^\"]+)\" ]]  && PARSE_PATH="${BASH_REMATCH[1]}"
+    PARSE_STATUS=""; PARSE_PATH=""; PARSE_UA=""; PARSE_XFF=""
+    [[ $line =~ \"status\":([0-9]+) ]]              && PARSE_STATUS="${BASH_REMATCH[1]}"
+    [[ $line =~ \"request_uri\":\"([^\"]+)\" ]]     && PARSE_PATH="${BASH_REMATCH[1]}"
     [[ $line =~ \"http_user_agent\":\"([^\"]*)\" ]] && PARSE_UA="${BASH_REMATCH[1]}"
     [[ $line =~ \"http_x_forwarded_for\":\"([^\"]*)\" ]] && PARSE_XFF="${BASH_REMATCH[1]}"
 }
@@ -581,7 +548,7 @@ apply_bans() {
         cnt=${SCORE_CNT[$ip]:-0}
         sigs="${SCORE_SIGS[$ip]:-}"
         nsigs=0
-        local _s
+        local _s _arr
         IFS=',' read -ra _arr <<< "$sigs"
         for _s in "${_arr[@]}"; do [[ -n "$_s" ]] && nsigs=$((nsigs+1)); done
         if (( score >= BAN_THRESHOLD && cnt >= MIN_REQUESTS && nsigs >= MIN_SIGNALS )); then
@@ -634,18 +601,15 @@ notify_send_bulk() {
     subject="autoban: $count IP(s) banned"
     body=$(cat "$file")
 
-    # Desktop notification (no-op if unavailable)
     if command -v notify-send >/dev/null 2>&1 && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
         notify-send -u normal "autoban" "$subject" 2>/dev/null || true
     fi
 
-    # Mail
     if command -v mail >/dev/null 2>&1 && [[ -n "$MAIL_TO" ]]; then
         printf '%s\n' "$body" | mail -s "$subject" "$MAIL_TO" 2>/dev/null || \
             log "mail delivery failed"
     fi
 
-    # Webhook (generic JSON POST)
     if [[ -n "$WEBHOOK_URL" ]] && command -v curl >/dev/null 2>&1; then
         local payload
         payload=$(printf '{"subject":"%s","count":%d,"body":"%s"}' \
@@ -805,20 +769,16 @@ process_line() {
     ip=$(resolve_client_ip "$socket_ip" "${PARSE_XFF:-}")
     is_ip "$ip" || return 0
 
-    # Skip protected / whitelisted / manually banned
     if is_never_ban "$ip"; then return 0; fi
     if is_manual_ban "$ip"; then return 0; fi
 
-    # Base signal: every request
     score_add "$ip" "request" 1
 
-    # Status signal
     case "${PARSE_STATUS:-}" in
         4??) score_add "$ip" "4xx" 5 ;;
         5??) score_add "$ip" "5xx" 8 ;;
     esac
 
-    # Path signal
     if [[ -n "${PARSE_PATH:-}" && -n "$SCAN_PATH_REGEX" ]]; then
         # shellcheck disable=SC2053
         if [[ "$PARSE_PATH" =~ $SCAN_PATH_REGEX ]]; then
@@ -826,7 +786,6 @@ process_line() {
         fi
     fi
 
-    # User-agent signal
     if [[ -n "${PARSE_UA:-}" && -n "$BAD_UA_REGEX" ]]; then
         # shellcheck disable=SC2053
         if [[ "$PARSE_UA" =~ $BAD_UA_REGEX ]]; then
@@ -888,7 +847,6 @@ run_daemon() {
 # Entry point
 # =============================================================================
 main() {
-    # First pass: config, mode flags, and subcommand
     while (( $# )); do
         case "$1" in
             -c|--config)  CONFIG_FILE="$2"; shift 2 ;;
@@ -906,7 +864,6 @@ main() {
         esac
     done
 
-    # Load config if present; commands like `test` work without root/ipset
     if [[ -f "$CONFIG_FILE" ]]; then
         load_config "$CONFIG_FILE"
     elif [[ "$ACTION" == "run" || "$ACTION" == "install" ]]; then
@@ -914,7 +871,6 @@ main() {
     fi
     validate_config
 
-    # Derived paths
     mkdir -p "$STATE_DIR" "$LOGS_DIR" 2>/dev/null || true
     EVENTS_LOG="$LOGS_DIR/events.jsonl"
     OFFENSE_DIR="$STATE_DIR/offenses"
@@ -934,3 +890,399 @@ main() {
 }
 
 main "$@"
+
+
+================================================================================
+=== FILE: autoban-initd
+================================================================================
+#!/bin/bash
+### BEGIN INIT INFO
+# Provides:          autoban
+# Required-Start:    $network $remote_fs
+# Required-Stop:     $network $remote_fs
+# Default-Start:     3 4 5
+# Default-Stop:      0 1 2 6
+# Short-Description: Adaptive log-driven IP ban daemon
+# Description:       Reads local web-server logs and manages the host's
+#                    own ipset/iptables firewall. Defensive tooling only.
+### END INIT INFO
+#
+# Thin SysV wrapper around autoban.sh. If systemd is present we delegate to
+# `systemctl` so behavior matches autoban.service exactly. Otherwise we
+# supervise autoban.sh directly with a proper PID file and signal handling.
+
+set -euo pipefail
+
+NAME="autoban"
+DAEMON="/opt/autoban/autoban.sh"
+CONFIG="/etc/autoban/autoban.conf"
+PIDFILE="/var/run/${NAME}.pid"
+
+if command -v systemctl >/dev/null 2>&1 \
+   && [[ -d /run/systemd/system ]] \
+   && systemctl list-unit-files 2>/dev/null | grep -q '^autoban\.service'; then
+    case "${1:-}" in
+        start)   exec systemctl start   autoban.service ;;
+        stop)    exec systemctl stop    autoban.service ;;
+        restart) exec systemctl restart autoban.service ;;
+        reload)  exec systemctl reload  autoban.service ;;
+        status)  exec systemctl status  autoban.service ;;
+        *)       echo "Usage: $0 {start|stop|restart|reload|status}" >&2; exit 1 ;;
+    esac
+fi
+
+[ -x "$DAEMON" ] || { echo "not executable: $DAEMON" >&2; exit 5; }
+
+is_running() {
+    [[ -f "$PIDFILE" ]] || return 1
+    local pid; pid=$(cat "$PIDFILE" 2>/dev/null || true)
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+do_start() {
+    if is_running; then
+        echo "$NAME already running (pid $(cat "$PIDFILE"))"
+        return 0
+    fi
+    [[ -f "$PIDFILE" ]] && rm -f "$PIDFILE"
+    echo -n "Starting $NAME: "
+    setsid "$DAEMON" --config "$CONFIG" run </dev/null >/dev/null 2>&1 &
+    local pid=$!
+    echo "$pid" > "$PIDFILE"
+    sleep 1
+    if is_running; then
+        echo "OK (pid $pid)"
+    else
+        echo "FAILED"
+        rm -f "$PIDFILE"
+        return 1
+    fi
+}
+
+do_stop() {
+    if ! is_running; then
+        echo "$NAME not running"
+        rm -f "$PIDFILE"
+        return 0
+    fi
+    echo -n "Stopping $NAME: "
+    local pid; pid=$(cat "$PIDFILE")
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in {1..15}; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "TIMEOUT, sending SIGKILL"
+        kill -KILL "$pid" 2>/dev/null || true
+    else
+        echo "OK"
+    fi
+    rm -f "$PIDFILE"
+}
+
+do_status() {
+    if is_running; then
+        echo "$NAME running (pid $(cat "$PIDFILE"))"
+    elif [[ -f "$PIDFILE" ]]; then
+        echo "$NAME dead but pidfile exists ($PIDFILE)"
+        return 1
+    else
+        echo "$NAME stopped"
+        return 3
+    fi
+}
+
+case "${1:-}" in
+    start)   do_start   ;;
+    stop)    do_stop    ;;
+    restart) do_stop; do_start ;;
+    reload)  is_running && kill -HUP "$(cat "$PIDFILE")" && echo "reloaded" ;;
+    status)  do_status  ;;
+    *)       echo "Usage: $0 {start|stop|restart|reload|status}" >&2; exit 1 ;;
+esac
+
+
+================================================================================
+=== FILE: autoban.service
+================================================================================
+[Unit]
+Description=autoban — adaptive log-driven IP ban daemon
+Documentation=file:/opt/autoban/README.md
+After=network-online.target nginx.service apache2.service
+Wants=network-online.target
+ConditionPathExists=/opt/autoban/autoban.sh
+
+[Service]
+Type=simple
+ExecStart=/opt/autoban/autoban.sh --config /etc/autoban/autoban.conf run
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStop=/bin/kill -TERM $MAINPID
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+User=root
+StateDirectory=autoban
+RuntimeDirectory=autoban
+LogsDirectory=autoban
+ConfigurationDirectory=autoban
+
+NoNewPrivileges=no
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+LimitNOFILE=8192
+ReadOnlyPaths=/var/log/nginx /var/log/apache2 /etc/autoban
+ReadWritePaths=/var/lib/autoban /var/log/autoban /run/autoban
+
+[Install]
+WantedBy=multi-user.target
+
+
+================================================================================
+=== FILE: autoban.conf
+================================================================================
+# =============================================================================
+# autoban.conf — configuration for autoban.sh
+#
+# Format: KEY=value, one per line. `#` starts a comment. Values are not
+# shell-evaluated; do not quote unless the value contains spaces.
+# After edits:  systemctl reload autoban   (SIGHUP)
+# =============================================================================
+
+# --- Source log --------------------------------------------------------------
+NGINX_LOG=/var/log/nginx/access.log
+# combined | json | custom
+LOG_FORMAT=combined
+# Required when LOG_FORMAT=custom. Capture groups 1..5 map to:
+#   ip, status, path, user-agent, x-forwarded-for
+PARSE_REGEX=
+
+# --- Real client IP ----------------------------------------------------------
+TRUSTED_PROXIES=127.0.0.1/32,::1/128
+# auto = honor XFF only when socket peer is trusted; yes = always; no = never.
+USE_XFF=auto
+
+# --- Detection window & thresholds ------------------------------------------
+WINDOW_SECONDS=60
+BAN_THRESHOLD=40
+MIN_REQUESTS=15
+# Do not set MIN_REQUESTS below 2 — single-request bans are trivially abusive.
+MIN_SIGNALS=2
+SCAN_PATH_REGEX=/(\.env|wp-login\.php|\.git|phpmyadmin|xmlrpc\.php|\.aws/credentials)
+BAD_UA_REGEX=(sqlmap|nikto|masscan|zgrab|python-requests|nmap|dirbuster|wfuzz|nuclei)
+
+# --- Ban lifecycle -----------------------------------------------------------
+DEFAULT_TTL=3600
+TTL_STEP=2
+MAX_TTL=604800
+
+# --- Lists -------------------------------------------------------------------
+NEVER_BAN=/etc/autoban/whitelist.txt
+MANUAL_BAN=/etc/autoban/blacklist.txt
+PROTECTED_RANGES=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,169.254.0.0/16,::1/128,fe80::/10
+
+# --- Firewall backend --------------------------------------------------------
+IPSET_NAME=autoban4
+IPSET_NAME6=autoban6
+
+# --- Notifications -----------------------------------------------------------
+# none | digest | per-ip
+NOTIFY=digest
+DIGEST_MINUTES=15
+MAIL_TO=admin@example.com
+WEBHOOK_URL=
+
+# --- Runtime -----------------------------------------------------------------
+POLL_INTERVAL=5
+STATE_DIR=/var/lib/autoban
+LOGS_DIR=/var/log/autoban
+
+
+================================================================================
+=== FILE: whitelist.txt
+================================================================================
+# =============================================================================
+# whitelist.txt — NEVER-BAN ranges (ipset hash:net)
+#
+# Loaded into the autoban_never{4,6} sets. Membership is checked before
+# scoring, so nothing here is ever banned. Use this file for:
+#   * your management / SSH source IPs
+#   * monitoring and health-checkers
+#   * upstream load balancers and reverse proxies
+#   * CDN egress ranges (Cloudflare, Fastly, CloudFront, etc.)
+#
+# Format:
+#   <ip-or-cidr>          plain entry
+#   <ip-or-cidr>  # note  inline comment
+#
+# Prefixes shorter than /8 are refused unless FORCE_BROAD=yes is exported.
+# =============================================================================
+
+# --- Loopback & link-local (also in PROTECTED_RANGES by default) -------------
+127.0.0.1/32
+::1/128
+
+# --- Cloudflare (https://www.cloudflare.com/ips/) ----------------------------
+173.245.48.0/20
+103.21.244.0/22
+103.22.200.0/22
+103.31.4.0/22
+141.101.64.0/18
+108.162.192.0/18
+190.93.240.0/20
+188.114.96.0/20
+197.234.240.0/22
+198.41.128.0/17
+162.158.0.0/15
+104.16.0.0/13
+104.24.0.0/14
+172.64.0.0/13
+131.0.72.0/22
+2400:cb00::/32
+2606:4700::/32
+2803:f800::/32
+2405:b500::/32
+2405:8100::/32
+2a06:98c0::/29
+2c0f:f248::/32
+
+# --- AWS / Azure health-check egress (adjust to your account) ----------------
+3.80.0.0/12
+18.208.0.0/13
+34.192.0.0/12
+34.224.0.0/12
+65.52.0.0/14
+68.67.152.0/21
+185.34.106.0/24    # your monitoring host
+185.34.107.0/24    # your monitoring host (secondary)
+
+# --- Add your operator IPs below --------------------------------------------
+# 203.0.113.7/32   # office VPN
+# 198.51.100.0/24  # staging ingress
+
+
+================================================================================
+=== FILE: blacklist.txt
+================================================================================
+# =============================================================================
+# blacklist.txt — MANUAL persistent bans (ipset hash:net)
+#
+# Loaded into autoban_manual{4,6} at startup. Membership is checked before
+# scoring, so anything here is always blocked (subject to whitelist override).
+#
+# Do NOT add auto-banned IPs here — those live in the runtime ipset with TTL.
+# Use this file only for entries you want to survive reboots and expire
+# manually.
+#
+# Format:
+#   <ip-or-cidr>                                  permanent until removed
+#   <ip-or-cidr>  # reason=... [until=YYYY-MM-DD]  annotated
+# =============================================================================
+
+# --- Known scanner sources (example placeholders — replace with real data) --
+# 192.0.2.0/24     # reason=continuous xmlrpc.php scanning until=2025-12-31
+# 198.51.100.44    # reason=credential stuffing until=2025-09-01
+# 2001:db8::/48    # reason=abusive v6 scanner until=2025-12-31
+
+# --- Empty by default. Add manual bans below as needed. ---------------------
+
+
+================================================================================
+=== FILE: README.md
+================================================================================
+# AutoBan
+
+Adaptive, log-driven IP ban daemon for nginx / Apache / HAProxy, built on
+`ipset` + `iptables` (`iptables-nft` on modern distros). Sliding-window
+scoring, TTL bans with recidivism escalation, CIDR-correct whitelist, and
+digest alerting — in a single auditable shell script.
+
+> **Defensive tooling only.** AutoBan reads *your own* web-server logs and
+> modifies *your own* host firewall. It does not probe, scan, or send traffic
+> to any remote host, and it never spoofs source addresses.
+
+**Version:** 2.0.0 · **License:** MIT (choose one before publishing)
+
+---
+
+## Why
+
+- `fail2ban` is large and regex-heavy; AutoBan is ~1,000 lines of readable
+  bash organized into 16 commented sections.
+- Built around `ipset`/`iptables-nft`, so bans are **O(1)**, IPv4/IPv6 aware,
+  and expire natively via set timeouts.
+- CIDR-correct whitelist (Cloudflare, CDN, monitoring) enforced *before*
+  scoring, so protected ranges can never be banned.
+- Real-client-IP resolution walks `X-Forwarded-For` only from trusted proxies.
+- Ships in **dry-run mode**; nothing touches the firewall until you turn it off.
+
+## Threat model
+
+| In scope | Out of scope |
+|---|---|
+| Single-IP / small-CIDR HTTP abuse: scanners, brute force, path probing, credential stuffing, bad UAs | Volumetric L3/L4 DDoS (use BGP RTBH / scrubbers) |
+| Recidivism: escalating TTL for repeat offenders | DNS amplification (see sibling project) |
+| Log-driven thresholds you can tune and audit | Endpoint compromise, lateral movement |
+| Misconfigured XFF chains and wrong-IP bans (mitigated by trusted-proxy walk) | Application-layer business-logic abuse |
+
+## How it decides
+
+Every request contributes weighted signals to a per-IP score inside a sliding
+window (`WINDOW_SECONDS`). An IP is banned only when **all** of the following
+are true:
+
+1. Score ≥ `BAN_THRESHOLD`
+2. At least `MIN_REQUESTS` requests were seen (minimum 2 enforced)
+3. At least `MIN_SIGNALS` distinct signal types fired
+
+Signals and default weights:
+
+| Signal | Trigger | Weight |
+|---|---|---|
+| `request` | any request | 1 |
+| `4xx` | status 400–499 | 5 |
+| `5xx` | status 500–599 | 8 |
+| `path` | `SCAN_PATH_REGEX` matches `.env`, `wp-login.php`, `.git`, etc. | 10 |
+| `ua` | `BAD_UA_REGEX` matches sqlmap, nikto, nuclei, etc. | 10 |
+
+The combination of threshold + min-requests + min-signals is what prevents the
+classic failure mode where one request from a shared NAT or CDN edge bans an
+entire range.
+
+Bans have a TTL. Repeat offenders get `DEFAULT_TTL × TTL_STEP^(offense-1)`,
+capped at `MAX_TTL`.
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `autoban.sh` | Engine: capture, parse, score, ban, notify, install/uninstall |
+| `autoban-initd` | Thin SysV shim; delegates to `systemctl` when systemd is present |
+| `autoban.service` | systemd unit with sandboxing and `ExecReload=SIGHUP` |
+| `autoban.conf` | Single source of truth: paths, thresholds, lists, notify |
+| `whitelist.txt` | Never-ban ranges (management, monitoring, CDN egress) |
+| `blacklist.txt` | Manual persistent bans with optional `reason=` / `until=` notes |
+
+## Requirements
+
+- Linux with `ipset` and `iptables` (or `iptables-nft`)
+- `bash` ≥ 4.3 (`mapfile`, `printf -v`)
+- `flock` (util-linux)
+- Optional: `curl` (webhook), `mail`/`sendmail` (email), `notify-send` (desktop)
+- Root or `CAP_NET_ADMIN` for firewall changes
+- **systemd** recommended; SysV supported via `autoban-initd`
+
+## Install
+
+```bash
+sudo ./autoban.sh install
